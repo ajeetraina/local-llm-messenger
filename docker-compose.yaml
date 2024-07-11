@@ -62,7 +62,7 @@ services:
       - "--log"
       - "stdout"
     environment:
-      - NGROK_AUTHTOKEN=2i6irzzJH9EuTiC7XripvV4SBcX_7NAeRmjZXrBWQhpqk1aY1
+      - NGROK_AUTHTOKEN=2i6irzzJXXXXXXXXXBWQhpqk1aY1
     network_mode: "host"
   ollama:
     image: ollama/ollama
