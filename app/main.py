@@ -1,3 +1,4 @@
+from dotenv import load_dotenv
 import os, requests, time, openai, json, logging
 from pprint import pprint
 from typing import Union, List
@@ -6,6 +7,8 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 from sendblue import Sendblue
+
+client = openai.Client(api_key="xxxxxxxxxxxx-xxxxxxx-xxxxxxxxxxxx")
 
 SENDBLUE_API_KEY = os.environ.get("SENDBLUE_API_KEY")
 SENDBLUE_API_SECRET = os.environ.get("SENDBLUE_API_SECRET")
@@ -56,19 +59,6 @@ def validate_model(model: str) -> bool:
 
 def get_ollama_model_list() -> List[str]:
     available_models = []
-    # for i in range(0, 20):
-    #     # crude loop to wait for ollama endpoint
-    #     # this doesn't work as expected
-    #     try:
-    #         tags = requests.get(OLLAMA_API + "/tags")
-    #         tags.raise_for_status()
-    #         break
-    #     except requests.exceptions.HTTPError as e:
-    #         print("FAILED TO GET OLLAMA TAGS. " + e.args[0])
-    #         time.sleep(2)
-    #     except ConnectionError as e:
-    #         print("FAILED TO GET OLLAMA TAGS. " + e.args[0])
-    #         time.sleep(2)
 
     tags = requests.get(OLLAMA_API + "/tags")
     all_models = json.loads(tags.text)
@@ -205,15 +195,36 @@ class Callback(BaseModel):
     plan: str
 
 
-def msg_openai(msg: Msg, model=DEFAULT_MODEL):
+
+
+def msg_openai(msg: Msg, model="gpt-3.5-turbo"):
     """Sends a message to openai"""
     message_with_context = create_messages_from_context("openai")
 
-    gpt_resp = openai.ChatCompletion.create(
-        model=model,
-        messages=message_with_context,
+    # Add the user's message and system context to the messages list
+    messages = [
+        {"role": "user", "content": msg.content},
+        {"role": "system", "content": "You are an AI assistant. You will answer in haiku."},
+    ]
+
+    # Convert JSON strings to Python dictionaries and add them to messages
+    messages.extend(
+        [
+            json.loads(line)  # Convert each JSON string back into a dictionary
+            for line in message_with_context
+        ]
     )
+
+    # Send the messages to the OpenAI model
+    gpt_resp = client.chat.completions.create(
+        model=model,
+        messages=messages,
+    )
+
+    # Append the system context to the context file
     append_context("system", gpt_resp.choices[0].message.content)
+
+    # Send a message to the sender
     msg_response = sendblue.send_message(
         msg.from_number,
         {
@@ -221,20 +232,25 @@ def msg_openai(msg: Msg, model=DEFAULT_MODEL):
             "status_callback": CALLBACK_URL,
         },
     )
+    
     return
 
 
-def msg_ollama(msg: Msg, model=DEFAULT_MODEL):
+
+def msg_ollama(msg: Msg, model=None):
     """Sends a message to the ollama endpoint"""
+    if model is None:
+        logger.error("Model is None when calling msg_ollama")
+        return  # Optionally handle the case more gracefully
+
     ollama_headers = {"Content-Type": "application/json"}
     ollama_data = (
-        '{"model":"'
-        + model
-        + '", "stream": false, "prompt":"'
-        + msg.content
-        + " in under "
-        + MAX_WORDS
-        + ' words"}'
+        '{"model":"' + model +
+        '", "stream": false, "prompt":"' +
+        msg.content +
+        " in under " +
+        str(MAX_WORDS) +  # Make sure MAX_WORDS is a string
+        ' words"}'
     )
     ollama_resp = requests.post(
         OLLAMA_API + "/generate", headers=ollama_headers, data=ollama_data
@@ -259,7 +275,6 @@ def msg_ollama(msg: Msg, model=DEFAULT_MODEL):
                 "status_callback": CALLBACK_URL,
             },
         )
-
     return
 
 
@@ -296,30 +311,35 @@ def append_context(source: str, content: str):
         f.write(line)
     f.close()
 
-
-def create_messages_from_context(provider_api: str):
+def create_messages_from_context(provider_api: str) -> List[str]:
     """Reads the context file and creates properly formatted messages"""
     messages = []
     f = open("context.txt", "r")
     lines = f.readlines()
-    if provider_api == "ollama":
-        # generate data for ollama
-        print("ollama context not supported")
+    for line in lines:
+        line_arr = line.split(",")
+        # each message in the array should look like
+        # {"role": "user|system", "content": "the message"}
+        messages.append(
+            '{"role":"'
+            + line_arr[0]
+            + '", "content": "'
+            + ",".join(line_arr[1:])
+            + '"}'
+        )
 
+    # Conditional statements for different provider APIs
+    if provider_api == "ollama":
+        # Generate data for Ollama
+        print("Ollama context not supported")
     elif provider_api == "openai":
-        # generate data for openai
-        for line in lines:
-            line_arr = line.split(",")
-            # each message in the array should look like
-            # {"role": "user|system", "content": "the message"}
-            messages.append(
-                '{"role":"'
-                + line_arr[0]
-                + '", "content": "'
-                + ",".join(line_arr[1:])
-                + '"}'
-            )
+        # Generate data for OpenAI
+        # Add your code here to generate messages for OpenAI
+        pass
+
+    # Notice the indentation here is the same as the lines above
     return messages
+
 
 
 def match_closest_model(model: str) -> str:
@@ -411,12 +431,94 @@ def health():
     return "hello"
 
 
+# def command(msg: Msg):
+#     """This is for slash commands that can be helpful from within messages.
+#     None of these commands should interact with a model"""
+
+#     commands = ["help", "list", "install", "default"]
+#     cmd = msg.content.strip("/").lower().split(" ")[0]
+#     match cmd:
+#         case "help":
+#             help_response = sendblue.send_message(
+#                 msg.from_number,
+#                 {
+#                     "content": "Available commands:\n/" + "\n/".join(commands),
+#                     "status_callback": CALLBACK_URL,
+#                 },
+#             )
+#         case "list":
+#             # list ai againts
+#             available_models = get_model_list()
+#             default_model = get_default_model()
+#             available_models = [
+#                 m.replace(default_model, default_model + "*") for m in available_models
+#             ]
+#             list_response = sendblue.send_message(
+#                 msg.from_number,
+#                 {
+#                     "content": "Available models:\n" + "\n".join(available_models),
+#                     "status_callback": CALLBACK_URL,
+#                 },
+#             )
+#         case "install":
+#             # install ollama
+#             args = msg.content.lower().split(" ")[1]
+#             pull_data = '{"name": "' + args + '","stream": false}'
+#             install_response = sendblue.send_message(
+#                 msg.from_number,
+#                 {
+#                     "content": "Installing " + args,
+#                     "status_callback": CALLBACK_URL,
+#                 },
+#             )
+#             try:
+#                 pull_resp = requests.post(OLLAMA_API + "/pull", data=pull_data)
+#                 pull_resp.raise_for_status()
+#             except requests.exceptions.HTTPError as err:
+#                 raise SystemExit(err)
+#             done_response = sendblue.send_message(
+#                 msg.from_number,
+#                 {
+#                     "content": "Installed " + args + " Use it with /default",
+#                     "status_callback": CALLBACK_URL,
+#                 },
+#             )
+#         case "default":
+#             # set default model
+#             args = msg.content.lower().split(" ")[1]
+#             matched_model = match_closest_model(args)
+#             print("setting default model " + matched_model)
+#             set_default_model(matched_model)
+#         case _:
+#             help_response = sendblue.send_message(
+#                 msg.from_number,
+#                 {
+#                     "content": "Command " + msg.content + " not available.",
+#                     "status_callback": CALLBACK_URL,
+#                 },
+#             )
+#     return
+
+
 def command(msg: Msg):
     """This is for slash commands that can be helpful from within messages.
     None of these commands should interact with a model"""
 
     commands = ["help", "list", "install", "default"]
-    cmd = msg.content.strip("/").lower().split(" ")[0]
+    parts = msg.content.strip("/").lower().split()
+    if not parts:
+        sendblue.send_message(
+            msg.from_number,
+            {
+                "content": "No command provided.",
+                "status_callback": CALLBACK_URL,
+            },
+        )
+        return
+    
+    cmd = parts[0]
+    args = parts[1] if len(parts) > 1 else None
+
     match cmd:
         case "help":
             help_response = sendblue.send_message(
@@ -427,7 +529,6 @@ def command(msg: Msg):
                 },
             )
         case "list":
-            # list ai againts
             available_models = get_model_list()
             default_model = get_default_model()
             available_models = [
@@ -441,18 +542,35 @@ def command(msg: Msg):
                 },
             )
         case "install":
-            # install ollama
-            args = msg.content.lower().split(" ")[1]
+            if not args:
+                sendblue.send_message(
+                    msg.from_number,
+                    {
+                        "content": "Please specify a model to install.",
+                        "status_callback": CALLBACK_URL,
+                    },
+                )
+                return
             pull_data = '{"name": "' + args + '","stream": false}'
             install_response = sendblue.send_message(
                 msg.from_number,
-                {"content": "Installing " + args, "status_callback": CALLBACK_URL},
+                {
+                    "content": "Installing " + args,
+                    "status_callback": CALLBACK_URL,
+                },
             )
             try:
                 pull_resp = requests.post(OLLAMA_API + "/pull", data=pull_data)
                 pull_resp.raise_for_status()
             except requests.exceptions.HTTPError as err:
-                raise SystemExit(err)
+                sendblue.send_message(
+                    msg.from_number,
+                    {
+                        "content": f"Failed to install {args}: {str(err)}",
+                        "status_callback": CALLBACK_URL,
+                    },
+                )
+                return
             done_response = sendblue.send_message(
                 msg.from_number,
                 {
@@ -461,8 +579,15 @@ def command(msg: Msg):
                 },
             )
         case "default":
-            # set default model
-            args = msg.content.lower().split(" ")[1]
+            if not args:
+                sendblue.send_message(
+                    msg.from_number,
+                    {
+                        "content": "Please specify a model to set as default.",
+                        "status_callback": CALLBACK_URL,
+                    },
+                )
+                return
             matched_model = match_closest_model(args)
             print("setting default model " + matched_model)
             set_default_model(matched_model)
@@ -477,5 +602,10 @@ def command(msg: Msg):
     return
 
 
+
+
+
 if __name__ == "__main__":
+    # Run the FastAPI app with uvicorn
+    load_dotenv()  # Ensure this is before using any env vars
     uvicorn.run(app, host="0.0.0.0", port=8000)
